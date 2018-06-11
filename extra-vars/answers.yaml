@@ -1,0 +1,64 @@
+### SET YOUR VARIABLES HERE
+###########################
+SSH_USER: centos                                            # User used to ssh to the remote system
+
+nfs_ip_addresses: 10.10.10.37                               # An IP address that the nodes can access/connect to
+
+masters_ip_addresses:
+  - external: 10.10.10.37                                   # External IP used to by ansible to connect
+    internal: 192.168.0.37                                  # Internal IP used by nodes
+    schedulable: "true"                                     # Set openshift_schedulable=true or false
+    node_labels: "{'region': 'infra', 'zone': 'default'}"   # Lables to be applied to the nodes
+
+### If you just have one node, then comment this section, nodes_ip_addresses, below
+nodes_ip_addresses:
+  - external: 10.10.10.73
+    internal: 192.168.0.73
+    node_labels: "{'region': 'primary', 'zone': 'default'}"
+  - external: 10.10.10.30
+    internal: 192.168.0.30
+    node_labels: "{'region': 'primary', 'zone': 'default'}"
+
+### To add a new node, just uncomment this section below 
+### This will create a new section, new_nodes, in your inventory file.
+### When you're done adding the node, move the IP(s) in the "nodes_ip_addresses" section above
+# new_nodes_ip_addresses:
+#   - external: 10.10.10.80
+#     internal: 192.168.0.80
+#     node_labels: "{'region': 'buildnode', 'zone': 'default'}"
+
+### Configuring Global Build Defaults with Ansible
+### ref: https://docs.openshift.org/latest/install_config/build_defaults_overrides.html#ansible-setting-global-build-defaults
+# builddefaults_nodeselectors: "{'region':'buildnode'}"
+
+### Configuring the Service Catalog
+# ref: https://docs.openshift.org/latest/install_config/install/advanced_install.html#enabling-service-catalog
+enable_service_catalog: false
+
+DOMAIN: example.com                         # or <public ip addres>.nip.io
+VERSION: 'v3.9.0'
+METRIC_LOGGING_VERSION: 'v3.9'
+RELEASE_VERSION: 'release-3.9'
+
+USE_CERTIFICATES: false                     # set to 'true' if you have your own wildcard certificate you want to use
+
+USE_LDAP_AUTH: false                        # set to 'true' if you want to use LDAP auth
+LDAP_URL: 'ldaps://ds.example.com:636/ou=people,dc=example,dc=com'
+
+USE_HTPASSWD_AUTH: true                     # set to 'false', if you don't want to use htpasswd auth or using LDAP auth
+CLUSTER_ADMIN: admin                        # admin username
+PASSWORD: password
+
+INSTALL_METRICS: True
+INSTALL_LOGGING: True
+
+API_PORT: '8443'
+
+# Wildcard Certificates
+OC_CRT_CERTIFICATE: "{{ playbook_dir }}/certificates/{{ DOMAIN }}/{{ DOMAIN }}.crt"
+OC_KEY_CERTIFICATE: "{{ playbook_dir }}/certificates/{{ DOMAIN }}/{{ DOMAIN }}.key"
+OC_CA_CERTIFICATE: "{{ playbook_dir }}/certificates/{{ DOMAIN }}/{{ DOMAIN }}.ca-bundle.crt"
+OC_BUNDLE_CERTIFICATE: "{{ playbook_dir }}/certificates/{{ DOMAIN }}/{{ DOMAIN }}.combined.pem"
+
+####### END VARS
+

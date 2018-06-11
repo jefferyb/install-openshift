@@ -1,0 +1,35 @@
+# This file is a template, and might need editing before it works on your project.
+# see https://docs.gitlab.com/ce/ci/yaml/README.html for all available options
+
+image: jefferyb/install-openshift
+
+stages:
+  - install
+  - provisioner
+  - add_nodes
+
+install_openshift:
+  stage: install
+  script:
+    - ansible localhost --extra-vars "@extra-vars/answers.yaml" -m git -a 'repo=https://github.com/openshift/openshift-ansible.git dest=openshift-ansible version="{{ RELEASE_VERSION }}"'
+    - ansible localhost --extra-vars "@extra-vars/answers.yaml" -m template -a "src=files/inventory.tmpl dest=${PWD}/inventory.install" --diff
+    - ansible -i inventory.install all -m ping
+    - time ansible-playbook --extra-vars "@extra-vars/answers.yaml" -i ${PWD}/inventory.install install-openshift.yaml --diff
+  when: manual
+
+setup_nfs_provisioner:
+  stage: provisioner
+  script:
+    - ansible localhost --extra-vars "@extra-vars/answers.yaml" -m template -a "src=files/inventory.tmpl dest=${PWD}/inventory.install" --diff
+    - ansible -i inventory.install all -m ping
+    - ansible-playbook --extra-vars "@extra-vars/answers.yaml" -i inventory.install playbooks/setup-nfs-provisioner.yaml
+  when: manual
+
+add_nodes_to_oc_cluster:
+  stage: add_nodes
+  script:
+    - ansible localhost --extra-vars "@extra-vars/answers.yaml" -m git -a 'repo=https://github.com/openshift/openshift-ansible.git dest=openshift-ansible version="{{ RELEASE_VERSION }}"'
+    - ansible localhost --extra-vars "@extra-vars/answers.yaml" -m template -a "src=files/inventory.tmpl dest=${PWD}/inventory.install" --diff
+    - ansible -i inventory.install all -m ping
+    - ansible-playbook --extra-vars "@extra-vars/answers.yaml" -i inventory.install playbooks/add-hosts-to-existing-cluster.yaml
+  when: manual

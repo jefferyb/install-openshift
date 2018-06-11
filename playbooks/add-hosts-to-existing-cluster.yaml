@@ -1,0 +1,74 @@
+---
+####### HOW TO RUN THIS:
+# Edit/add or comment out the "new_nodes_ip_addresses" section with the IPs of the new node(s) in extra-vars/answers.yaml
+#       new_nodes_ip_addresses:
+#         - external: 10.10.10.80
+#           internal: 192.168.0.80
+#           node_labels: "{'region': 'buildnode', 'zone': 'default'}"
+#
+### Clone https://github.com/openshift/openshift-ansible.git, if you haven't
+# $ ansible localhost --extra-vars "@extra-vars/answers.yaml" -m git -a 'repo=https://github.com/openshift/openshift-ansible.git dest=openshift-ansible version="{{ RELEASE_VERSION }}"'
+#
+### Create/update your inventory file
+# $ ansible localhost --extra-vars "@extra-vars/answers.yaml" -m template -a "src=files/inventory.tmpl dest=inventory.install"
+#
+### Check the inventory file, inventory.install, and then start the install
+# $ ansible -i inventory.install all -m ping
+# $ ansible-playbook --extra-vars "@extra-vars/answers.yaml" -i inventory.install add-hosts-to-existing-cluster.yaml
+#
+# REF: https://docs.openshift.org/latest/install_config/adding_hosts_to_existing_cluster.html#adding-nodes-advanced
+####### </ Jeffery Bagirimvano >
+
+### SETUP/PREPARE HOSTS 
+- hosts: new_nodes
+  become: true
+  become_user: root
+  vars:
+    list_of_packages:
+      - bash-completion
+      - NetworkManager
+      - docker-1.13.1
+      - subscription-manager
+
+  tasks:
+    - block:
+        - name: RedHat - Update all Packages
+          yum: name=* state=latest
+          register: updated_all_packages
+
+        - name: reboot nodes
+          shell: sleep 2 && shutdown -r now "System package upgraded"
+          async: 1
+          poll: 0
+          ignore_errors: true
+          when: updated_all_packages.changed
+
+        - name: wait for server to come back
+          local_action: wait_for
+          args:
+            host: "{{ inventory_hostname }}"
+            port: 22
+            state: started
+            delay: 30
+            timeout: 300
+          when: updated_all_packages.changed
+          become: false
+
+        - name: RedHat - Install Base Packages
+          yum: name="{{ list_of_packages }}" state=latest
+
+        - name: Start and Enable NetworkManager
+          service: name=NetworkManager state=started enabled=yes
+
+        - name: Start and Enable docker
+          service: name=docker state=started enabled=yes
+      when:
+        - ansible_pkg_mgr == 'yum'
+
+### ADD HOST TO EXISTING CLUSTER
+# for release-3.7
+# - import_playbook: ../openshift-ansible/playbooks/byo/openshift-node/scaleup.yml
+
+# for release-3.8 and above
+- import_playbook: ../openshift-ansible/playbooks/openshift-node/scaleup.yml
+

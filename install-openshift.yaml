@@ -1,0 +1,302 @@
+---
+####### HOW TO RUN THIS:
+# Edit extra-vars/answers.yaml or create your own like:
+#       cp extra-vars/answers.yaml extra-vars/example.com-vars.yaml
+#       vim extra-vars/example.com-vars.yaml
+### Clone https://github.com/openshift/openshift-ansible.git
+# $ ansible localhost --extra-vars "@extra-vars/answers.yaml" -m git -a 'repo=https://github.com/openshift/openshift-ansible.git dest=openshift-ansible version="{{ RELEASE_VERSION }}"'
+#
+### Create your inventory file
+# $ ansible localhost --extra-vars "@extra-vars/answers.yaml" -m template -a "src=files/inventory.tmpl dest=inventory.install"
+#
+### Check the inventory file, inventory.install, ping the server for connections, and then start the install
+# $ ansible -i inventory.install all -m ping
+# $ ansible-playbook --extra-vars "@extra-vars/answers.yaml" -i inventory.install install-openshift.yaml
+#
+####### </ Jeffery Bagirimvano >
+
+- hosts: all
+  become: true
+  become_user: root
+  vars:
+    nodes_base_packages:
+      - bash-completion
+      - NetworkManager
+      - docker-1.13.1
+      - subscription-manager
+    masters_base_packages:
+      - wget
+      - htop
+      - git
+      - net-tools
+      - docker-1.13.1
+      - bind-utils
+      - iptables-services
+      - bridge-utils
+      - bash-completion
+      - kexec-tools
+      - sos
+      - psacct
+      - python-rhsm
+      - pyOpenSSL
+      - python-cryptography
+      - python-lxml
+      - java-1.8.0-openjdk-headless
+      - patch
+      - httpd-tools
+      - zile
+      - nano
+      - python2-pip
+      - openssl-devel
+      - python-devel
+      - NetworkManager
+      - python-passlib
+      - subscription-manager
+      - "@Development Tools"
+  tasks:
+### PREP FOR THE INSTALL
+    ### Check for certs and exit out early if we can't find them (if you chose to use them)
+    - name: "Check if {{ OC_BUNDLE_CERTIFICATE }} exists"
+      stat:
+        path: "{{ item }}"
+      with_items:
+        - "{{ OC_CRT_CERTIFICATE }}"
+        - "{{ OC_KEY_CERTIFICATE }}"
+        - "{{ OC_CA_CERTIFICATE }}"
+        - "{{ OC_BUNDLE_CERTIFICATE }}"
+      when: 
+        - USE_CERTIFICATES
+      delegate_to: localhost
+      become: false
+      register: cert_result
+
+    - name: Certificate results
+      debug:
+        msg: 
+          - "Does '{{ cert_result.results.0.item }}' exist: '{{ cert_result.results.0.stat.exists }}'"
+          - "Does '{{ cert_result.results.1.item }}' exist: '{{ cert_result.results.1.stat.exists }}'"
+          - "Does '{{ cert_result.results.2.item }}' exist: '{{ cert_result.results.2.stat.exists }}'"
+          - "Does '{{ cert_result.results.3.item }}' exist: '{{ cert_result.results.3.stat.exists }}'"
+      when: 
+        - USE_CERTIFICATES
+
+    - name: I can't find your certificates
+      fail:
+        msg: "Whoops! You asked to use certificates, 'USE_CERTIFICATES: true', but I can't seem to find one or more of your certificate(s)"
+      when:
+        -  USE_CERTIFICATES 
+        - ((cert_result.results.0.stat.exists == false) or
+            (cert_result.results.1.stat.exists == false) or
+            (cert_result.results.2.stat.exists == false) or
+            (cert_result.results.3.stat.exists == false))
+
+    - name: Install epel-release
+      yum: name=epel-release state=latest
+      when: inventory_hostname in groups.masters
+
+    - name: Update all Packages
+      yum: name=* state=latest
+      register: updated_all_packages
+
+    - name: reboot nodes
+      shell: sleep 2 && shutdown -r now "System package upgraded"
+      async: 1
+      poll: 0
+      ignore_errors: true
+      when: updated_all_packages.changed
+
+    - name: wait for server to come back
+      local_action: wait_for
+      args:
+        host: "{{ inventory_hostname }}"
+        port: 22
+        state: started
+        delay: 30
+        timeout: 300
+      when: updated_all_packages.changed
+      become: false
+
+    - name: Install Base Packages on nodes
+      yum: name="{{ nodes_base_packages }}" state=latest
+      when: inventory_hostname in groups.nodes
+
+    - name: Install Base Packages on masters
+      yum: name="{{ masters_base_packages }}" state=latest
+      when: inventory_hostname in groups.masters
+
+    - name: Start and Enable NetworkManager
+      service: name=NetworkManager state=started enabled=yes
+
+    - name: Start and Enable docker
+      service: name=docker state=started enabled=yes
+
+    - name: "Edit hosts file"
+      lineinfile: 
+        dest: /etc/hosts 
+        regexp: '^{{ ansible_default_ipv4.address }}*' 
+        line: "{{ ansible_default_ipv4.address }}           {{ ansible_fqdn }} console console.{{ DOMAIN }}"
+        state: present
+      when: 
+        - ansible_default_ipv4.address is defined
+        - inventory_hostname in groups.masters
+
+    - name: Clone openshift-ansible
+      git:
+        repo: 'https://github.com/openshift/openshift-ansible.git'
+        dest: openshift-ansible
+        version: "{{ RELEASE_VERSION }}"
+        force: yes
+      delegate_to: localhost
+      run_once: true
+      become: false
+
+### START THE OPENSHIFT INSTALL
+
+# for release-3.7
+# - import_playbook: openshift-ansible/playbooks/byo/config.yml
+
+# for release-3.8 and above
+- import_playbook: openshift-ansible/playbooks/prerequisites.yml
+- import_playbook: openshift-ansible/playbooks/deploy_cluster.yml
+
+### POST INSTALL
+- hosts: masters
+  become: true
+  become_user: root
+  tasks:
+    - name: Configure CLUSTER_ADMIN in htpasswd
+      shell: htpasswd -b /etc/origin/master/htpasswd {{ CLUSTER_ADMIN }} {{ PASSWORD }}
+      when: USE_HTPASSWD_AUTH
+
+    - name: Configure cluster-admin and token life
+      shell: |
+        /usr/local/bin/oc adm policy add-cluster-role-to-user cluster-admin {{ CLUSTER_ADMIN }}
+
+        # Add longer token life for default users
+        sed -i 's|accessTokenMaxAgeSeconds: 86400|accessTokenMaxAgeSeconds: 8640000|g' /etc/origin/master/master-config.yaml
+
+        # Install some useful tools
+        echo "Installing oc bash-completion & kompose"
+        echo "curl -G https://raw.githubusercontent.com/openshift/origin/master/contrib/completions/bash/oc > /etc/bash_completion.d/oc"
+
+        KOMPOSE_VERSION="$(curl -s https://api.github.com/repos/kubernetes/kompose/releases/latest | jq -r ".tag_name")"
+        echo "curl -L https://github.com/kubernetes-incubator/kompose/releases/download/${KOMPOSE_VERSION}/kompose-linux-amd64 -o /usr/local/bin/kompose" | sudo bash
+        chmod +x /usr/local/bin/kompose
+      args:
+        creates: /usr/local/bin/kompose
+        executable: /bin/bash
+
+    - name: restart service origin-master-api & origin-master-controllers
+      systemd:
+        state: restarted
+        daemon_reload: yes
+        name: "{{ item }}"
+      with_items:
+        - origin-master-api
+        - origin-master-controllers
+
+    - name: "Check if {{ OC_BUNDLE_CERTIFICATE }} exists"
+      stat:
+        path: "{{ OC_BUNDLE_CERTIFICATE }}"
+      delegate_to: localhost
+      become: false
+      register: cert_result
+      when: 
+        - USE_CERTIFICATES
+
+    - name: Copy wildcard certificate
+      copy:
+        src: "{{ OC_BUNDLE_CERTIFICATE }}"
+        dest: /etc/origin/master/named_certificates/{{ DOMAIN }}.wildcard.pem
+      when: 
+        - USE_CERTIFICATES
+        - cert_result.stat.exists == True 
+
+    - name: Adding Wildcard Certificate to Default OpenShift Origin Router
+      shell: |
+        # Adding Wildcard Certificate to Default OpenShift Origin Router
+        # REF: https://medium.com/@james_devcomb/adding-wildcard-certificate-to-default-openshift-origin-router-77402464a782
+        /usr/local/bin/oc login -u system:admin
+        /usr/local/bin/oc project default
+        /usr/local/bin/oc delete $(/usr/local/bin/oc get pods --show-all=false -o name|grep router)
+        /usr/local/bin/oc delete service router && /usr/local/bin/oc delete secrets router-certs && /usr/local/bin/oc delete serviceaccounts "router" && /usr/local/bin/oc delete clusterrolebindings "router-router-role" && /usr/local/bin/oc delete deploymentconfigs "router"
+        /usr/local/bin/oc adm router router --default-cert="/etc/origin/master/named_certificates/{{ DOMAIN }}.wildcard.pem" --selector='region=infra' --service-account=router --replicas=1
+        while [ $(/usr/local/bin/oc get $(/usr/local/bin/oc get pods --show-all=false -o name|grep router) -o yaml | grep "ready:" | awk '{print $2}') != true ]
+        do
+          echo "Waiting for router to be ready"
+        done
+        touch /etc/origin/master/named_certificates/.wildcard_cert.added
+      args:
+        creates: /etc/origin/master/named_certificates/.wildcard_cert.added
+        executable: /bin/bash
+      when: 
+        - USE_CERTIFICATES
+        - cert_result.stat.exists == True 
+      register: install_router
+
+    - debug:
+        var: install_router.stdout_lines
+      when: install_router.changed
+
+    - name: Securing the Registry Console
+      shell: |
+        # Securing the Registry Console
+        # https://docs.openshift.org/latest/install_config/registry/deploy_registry_existing_clusters.html#securing-the-registry-console
+        mkdir -p /etc/origin/master/named_certificates/cockpit/ws-certs.d
+        cp "/etc/origin/master/named_certificates/{{ DOMAIN }}.wildcard.pem" /etc/origin/master/named_certificates/cockpit/ws-certs.d/registry-console.cert
+        chmod go-r /etc/origin/master/named_certificates/cockpit/ws-certs.d/registry-console.cert
+        /usr/local/bin/oc create secret generic console-secret --from-file=/etc/origin/master/named_certificates/cockpit/ws-certs.d/registry-console.cert
+        /usr/local/bin/oc volume dc/registry-console --add --type=secret --secret-name=console-secret -m /etc/cockpit/ws-certs.d
+        touch /etc/origin/master/named_certificates/.registry-console-cert.added
+      args:
+        creates: /etc/origin/master/named_certificates/.registry-console-cert.added
+        executable: /bin/bash
+      when: 
+        - USE_CERTIFICATES
+        - cert_result.stat.exists == True 
+      register: install_registry_console
+
+    - debug:
+        var: install_registry_console.stdout_lines
+      when: install_registry_console.changed
+
+    - name: Backup inventory.install
+      copy:
+        src: inventory.install
+        dest: /etc/origin/master/inventory.install.{{ DOMAIN }}
+        owner: root
+        group: root
+        mode: 0600
+      when: inventory_hostname in groups.masters
+
+    - name: After install message - htpasswd
+      debug:
+        msg: 
+          - "*******"
+          - ""
+          - "* Your console is https://console.{{ DOMAIN }}:{{ API_PORT }}"
+          - "* Your username is {{ CLUSTER_ADMIN }} "
+          - "* Your password is {{ PASSWORD }} "
+          - "*"
+          - "* Your inventory file, inventory.install, has been backed up at /etc/origin/master/inventory.install.{{ DOMAIN }} on your masters host"
+          - "*"
+          - "* Login using:"
+          - "*"
+          - "$ oc login -u {{ CLUSTER_ADMIN }} -p {{ PASSWORD }} https://console.{{ DOMAIN }}:{{ API_PORT }}/"
+          - "*******"
+      when: USE_HTPASSWD_AUTH
+
+    - name: After install message - LDAP
+      debug:
+        msg: 
+          - "*******"
+          - ""
+          - "* Your console is https://console.{{ DOMAIN }}:{{ API_PORT }}"
+          - "* Your username is {{ CLUSTER_ADMIN }} "
+          - "* Use your LDAP password "
+          - "*"
+          - "* Login using:"
+          - "*"
+          - "$ oc login -u {{ CLUSTER_ADMIN }} https://console.{{ DOMAIN }}:{{ API_PORT }}/"
+          - "*******"
+      when: USE_LDAP_AUTH

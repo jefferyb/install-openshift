@@ -1,0 +1,138 @@
+---
+####### HOW TO RUN THIS:
+### Edit extra-vars/answers.yaml or create your own and make sure "nfs_ip_addresses" and "masters_ip_addresses.external" are set:
+#
+### Create a hosts file
+# $ ansible localhost --extra-vars "@extra-vars/answers.yaml" -m template -a "src=files/inventory.tmpl dest=inventory.install"
+#
+### Start the install
+# $ ansible-playbook --extra-vars "@extra-vars/answers.yaml" -i inventory.install.delete playbooks/setup-nfs-provisioner.yaml
+#
+# REF: https://github.com/kubernetes-incubator/external-storage/tree/master/nfs-client
+####### Created by Jeffery Bagirimvano
+
+- name: Setup NFS for PersistentVolumes
+  hosts: nfs
+  become: true
+  vars:
+    oc_nfs_path: /openshift/nfs
+    list_of_packages:
+      - nfs-utils
+      - bash-completion
+  tasks:
+    - name: Create nfs folders
+      file:
+        path: "{{ oc_nfs_path }}"
+        owner: nfsnobody
+        group: nfsnobody
+        mode: 0777
+        state: directory
+
+    - name: install nfs-utils
+      yum: 
+        name: "{{ list_of_packages }}"
+        state: latest
+
+    - name: start & enable nfs
+      systemd:
+        name: nfs-server
+        state: started
+        enabled: yes
+
+    - name: Set virt_use_nfs flag on and keep it persistent across reboots
+      seboolean:
+        name: virt_use_nfs
+        state: yes
+        persistent: yes
+
+    - name: edit /etc/exports
+      lineinfile:
+        dest: /etc/exports
+        owner: root
+        group: root
+        create: yes
+        line: "{{ oc_nfs_path }}  *(rw,root_squash,no_subtree_check)"
+        regexp: "^{{ oc_nfs_path }}"
+      register: exports
+
+    - name: Kick exportfs if /etc/exports changed
+      command: /usr/sbin/exportfs -ra
+      when: exports.changed
+
+
+- name: Setup NFS Provisioner
+  hosts: masters
+  gather_facts: no
+  vars:
+    oc_nfs_path: /openshift/nfs
+  tasks:
+    # Files last update from commit 0565dd7
+    # https://github.com/kubernetes-incubator/external-storage/search?q=0565dd7&type=Commits
+    # https://github.com/kubernetes-incubator/external-storage/tree/0565dd72fe87ddd329ca37fea18e1e1b498ee81d/nfs-client
+    - name: Copy definition files
+      template:
+        src: nfs-provisioner/{{ item }}
+        dest: /tmp/{{ item }}
+      with_items:
+        - 1.deployment.yaml
+        - 2.class.yaml
+        - 3.serviceaccount.yaml
+        - 4.openshift-clusterrole.yaml
+        - 5.test-claim.yaml
+        - 6.test-pod.yaml
+
+    - name: Deploy nfs-client-provisioner
+      shell: |
+        /usr/local/bin/oc project default
+        /usr/local/bin/oc get -f 1.deployment.yaml || /usr/local/bin/oc create -f 1.deployment.yaml
+        /usr/local/bin/oc get -f 2.class.yaml || /usr/local/bin/oc create -f 2.class.yaml
+        /usr/local/bin/oc get -f 3.serviceaccount.yaml || /usr/local/bin/oc create -f 3.serviceaccount.yaml
+        /usr/local/bin/oc get -f 4.openshift-clusterrole.yaml || /usr/local/bin/oc create -f 4.openshift-clusterrole.yaml
+      args:
+        chdir: /tmp/
+      register: provisioner
+
+    - name: Deploy policy
+      shell: |
+        /usr/local/bin/oc project default
+        /usr/local/bin/oc adm policy add-scc-to-user hostmount-anyuid system:serviceaccount:default:nfs-client-provisioner
+        /usr/local/bin/oc adm policy add-cluster-role-to-user nfs-client-provisioner-runner system:serviceaccount:default:nfs-client-provisioner
+        /usr/local/bin/oc patch deployment nfs-client-provisioner -p '{"spec":{"template":{"spec":{"serviceAccount":"nfs-client-provisioner"}}}}'
+        sudo touch /etc/origin/master/.nfs-client-provisioned
+      args:
+        chdir: /tmp/
+        executable: /bin/bash
+        creates: "/etc/origin/master/.nfs-client-provisioned"
+      register: policies
+
+    - name: Display provisioner
+      debug: 
+        var: provisioner.stdout_lines
+      when: provisioner.changed
+
+    - name: Display policy
+      debug: 
+        var: policies.stdout_lines
+      when: policies.changed
+
+    - name: Test nfs-client-provisioner
+      shell: |
+        sleep 15
+        /usr/local/bin/oc new-project test-nfs-client-provisioner
+        sleep 3
+        /usr/local/bin/oc create -f 5.test-claim.yaml
+        /usr/local/bin/oc create -f 6.test-pod.yaml
+        sleep 15
+        /usr/local/bin/oc get -f 5.test-claim.yaml
+        /usr/local/bin/oc get -f 6.test-pod.yaml
+        /usr/local/bin/oc delete project test-nfs-client-provisioner
+        echo "check the folder renamed to archived-???"
+      args:
+        chdir: /tmp/
+        executable: /bin/bash
+      register: test_provisioner
+
+    - name: Display test_provisioner
+      debug: 
+        var: test_provisioner.stdout_lines
+      when: test_provisioner.changed
